@@ -5,7 +5,11 @@ pre-commit:
       run: npm run check:fix {staged_files}
       stage_fixed: true
     tests:
-      run: npm test
+      # Skip integration tests in pre-commit: they hit the live Hevy API and
+      # require the test account to already contain workouts/routines, which
+      # isn't a property of the code change being committed. Run them on
+      # demand with `npm test`.
+      run: npm test -- --exclude "tests/integration/**"
 
 # Validate commit messages
 commit-msg:

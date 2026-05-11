@@ -27,16 +27,25 @@ const version =
 
 // Sentry monitoring is baked into the built MCP server so usage and errors
 // from users of the published package are captured for observability.
-const sentryRelease = process.env.SENTRY_RELEASE ?? `${name}@${version}`;
-const sentryConfig = {
-	dsn: "https://ce696d8333b507acbf5203eb877bce0f@o4508975499575296.ingest.de.sentry.io/4509049671647312",
-	release: sentryRelease,
-	// Tracing must be enabled for MCP monitoring to work
-	tracesSampleRate: 1.0,
-	sendDefaultPii: false,
-} as const;
+// The default DSN points at the upstream maintainer's Sentry project. For
+// private deployments (forks), set SENTRY_DSN="" to disable telemetry, or
+// set it to your own DSN to redirect telemetry to your project.
+const SENTRY_DSN_DEFAULT =
+	"https://ce696d8333b507acbf5203eb877bce0f@o4508975499575296.ingest.de.sentry.io/4509049671647312";
+const sentryDsnEnv = process.env.SENTRY_DSN;
+const sentryDsn =
+	sentryDsnEnv === undefined ? SENTRY_DSN_DEFAULT : sentryDsnEnv;
 
-Sentry.init(sentryConfig);
+if (sentryDsn) {
+	const sentryRelease = process.env.SENTRY_RELEASE ?? `${name}@${version}`;
+	Sentry.init({
+		dsn: sentryDsn,
+		release: sentryRelease,
+		// Tracing must be enabled for MCP monitoring to work
+		tracesSampleRate: 1.0,
+		sendDefaultPii: false,
+	});
+}
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";

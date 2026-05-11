@@ -1,0 +1,163 @@
+/**
+ * Streamable HTTP transport for the Hevy MCP server.
+ *
+ * Wraps the upstream stdio MCP (src/index.ts → buildServer) in a remote,
+ * claude.ai-compatible deployment. Auth model: OAuth 2.1 + PKCE
+ * authorization server, single pre-registered client, "always approve"
+ * (single-user deployment). See ~/dev/ai-skills-develop/skills/devops/
+ * remote-mcp-wrap/SKILL.md for the full architecture.
+ */
+
+import express, { type Request, type Response } from "express";
+import { randomUUID } from "node:crypto";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
+import createServer from "./index.js";
+import { MinimalOAuthProvider } from "./oauth-provider.js";
+
+function requireEnv(name: string): string {
+	const v = process.env[name];
+	if (!v) {
+		console.error(`[hevy-mcp] Missing required env var: ${name}`);
+		process.exit(1);
+	}
+	return v;
+}
+
+const HEVY_API_KEY = requireEnv("HEVY_API_KEY");
+const OAUTH_CLIENT_ID = requireEnv("OAUTH_CLIENT_ID");
+const OAUTH_CLIENT_SECRET = requireEnv("OAUTH_CLIENT_SECRET");
+
+const ISSUER_URL = new URL(
+	process.env.OAUTH_ISSUER_URL ?? "https://hevy-mcp.christhonie.co.za",
+);
+
+const REDIRECT_URIS = (
+	process.env.OAUTH_REDIRECT_URIS ??
+	"https://claude.ai/api/mcp/auth_callback,https://claude.com/api/mcp/auth_callback,http://localhost:3000/callback"
+)
+	.split(",")
+	.map((s) => s.trim())
+	.filter(Boolean);
+
+const PORT = Number(process.env.PORT ?? 8000);
+const HOST = process.env.HOST ?? "0.0.0.0";
+
+const provider = new MinimalOAuthProvider({
+	clientId: OAUTH_CLIENT_ID,
+	clientSecret: OAUTH_CLIENT_SECRET,
+	redirectUris: REDIRECT_URIS,
+	clientName: "Hevy MCP",
+});
+
+const app = express();
+app.disable("x-powered-by");
+app.use(express.json({ limit: "1mb" }));
+
+app.get("/healthz", (_req, res) => {
+	res.status(200).json({ status: "ok" });
+});
+
+app.use(
+	mcpAuthRouter({
+		provider,
+		issuerUrl: ISSUER_URL,
+		baseUrl: ISSUER_URL,
+		resourceName: "Hevy MCP",
+	}),
+);
+
+const requireBearer = requireBearerAuth({
+	verifier: provider,
+	resourceMetadataUrl: new URL(
+		"/.well-known/oauth-protected-resource",
+		ISSUER_URL,
+	).toString(),
+});
+
+// One transport (and one upstream McpServer) per MCP session.
+const transports = new Map<string, StreamableHTTPServerTransport>();
+
+app.post("/mcp", requireBearer, async (req, res) => {
+	const sid = req.header("mcp-session-id");
+	let transport = sid ? transports.get(sid) : undefined;
+
+	if (!transport) {
+		if (sid) {
+			res.status(404).json({
+				jsonrpc: "2.0",
+				error: { code: -32004, message: "Unknown session" },
+				id: null,
+			});
+			return;
+		}
+		if (!isInitializeRequest(req.body)) {
+			res.status(400).json({
+				jsonrpc: "2.0",
+				error: { code: -32003, message: "First request must be initialize" },
+				id: null,
+			});
+			return;
+		}
+
+		const newTransport = new StreamableHTTPServerTransport({
+			sessionIdGenerator: () => randomUUID(),
+			onsessioninitialized: (id) => {
+				transports.set(id, newTransport);
+				console.error(`[hevy-mcp] session opened: ${id}`);
+			},
+		});
+		newTransport.onclose = () => {
+			if (newTransport.sessionId) {
+				transports.delete(newTransport.sessionId);
+				console.error(`[hevy-mcp] session closed: ${newTransport.sessionId}`);
+			}
+		};
+
+		const mcp = createServer({ config: { apiKey: HEVY_API_KEY } });
+		await mcp.connect(newTransport);
+		transport = newTransport;
+	}
+
+	await transport.handleRequest(req, res, req.body);
+});
+
+const handleSessionGetDelete = async (req: Request, res: Response) => {
+	const sid = req.header("mcp-session-id");
+	const transport = sid ? transports.get(sid) : undefined;
+	if (!transport) {
+		res.status(400).send("Missing or unknown Mcp-Session-Id");
+		return;
+	}
+	await transport.handleRequest(req, res);
+};
+
+app.get("/mcp", requireBearer, handleSessionGetDelete);
+app.delete("/mcp", requireBearer, handleSessionGetDelete);
+
+const server = app.listen(PORT, HOST, () => {
+	console.error(
+		`[hevy-mcp] Streamable HTTP listening on http://${HOST}:${PORT}`,
+	);
+	console.error(`[hevy-mcp] OAuth issuer: ${ISSUER_URL.toString()}`);
+	console.error(
+		`[hevy-mcp] Pre-registered redirect URIs: ${REDIRECT_URIS.join(", ")}`,
+	);
+});
+
+const shutdown = (signal: string) => {
+	console.error(`[hevy-mcp] ${signal} received, draining…`);
+	server.close(() => process.exit(0));
+	for (const t of transports.values()) void t.close();
+	setTimeout(() => process.exit(1), 10_000).unref();
+};
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("uncaughtException", (err) =>
+	console.error("[hevy-mcp] uncaughtException:", err),
+);
+process.on("unhandledRejection", (err) =>
+	console.error("[hevy-mcp] unhandledRejection:", err),
+);
