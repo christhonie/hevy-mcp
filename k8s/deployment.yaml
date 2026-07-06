@@ -30,7 +30,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: hevy-mcp
-          image: docker.io/christhonie/hevy-mcp:0.1.0
+          image: docker.io/christhonie/hevy-mcp:1.24.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
