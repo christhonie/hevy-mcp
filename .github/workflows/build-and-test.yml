@@ -1,5 +1,11 @@
 name: Build and Test
 
+# PR gate: lint/format check, build, and unit tests. Integration tests
+# (tests/integration/**) are excluded — they require a live HEVY_API_KEY and
+# are exercised locally, not in CI. Upstream's Codecov upload and OpenTelemetry
+# export were removed with the fork's npm-publish workflow: they need secrets
+# this deployment does not carry and add no value for a self-hosted image build.
+
 on:
   push:
     branches:
@@ -37,32 +43,6 @@ jobs:
 
       - name: Run build
         run: npm run build
-        env:
-          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 
-      - name: Run tests with coverage
-        run: npx vitest run --coverage
-        env:
-          HEVY_API_KEY: ${{ secrets.HEVY_API_KEY }}
-
-      - name: Upload results to Codecov
-        uses: codecov/codecov-action@v6
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage/lcov.info
-
-  otel-cicd-action:
-    if: always()
-    name: OpenTelemetry Export Trace
-    runs-on: ubuntu-latest
-    needs: [build]
-    steps:
-      - name: Export workflow
-        uses: corentinmusard/otel-cicd-action@v4
-        with:
-          otlpEndpoint: "grpc://in-otel.hyperdx.io:4317/"
-          otlpHeaders: ${{ secrets.HYPERDX_OTLP_HEADERS }}
-          githubToken: ${{ secrets.GITHUB_TOKEN }}
-          runId: ${{ github.run_id }}
+      - name: Run unit tests
+        run: npx vitest run --exclude tests/integration/**
